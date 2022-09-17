@@ -1,0 +1,450 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ack-node-problem-detector-config
+  namespace: kube-system
+data:
+  check_docker_offline.sh: |
+    #!/bin/bash
+
+    ## release 20220119
+    ## 1. dockerd only.
+    ## 2. containerd only, without dockerd.
+    ## 3. containerd wraped by dockerd.
+
+    OK=0
+    NONOK=1
+    UNKNOWN=2
+
+    # check docker offline
+
+    # check dockerd containerd service exist
+    systemctl list-units --type=service -a | grep -E -q 'docker|containerd'
+    if [ $? -ne 0 ]; then
+        echo "node not install docker or containerd"
+        exit ${UNKNOWN}
+    fi
+
+    # 1. docker runtime. docker.service.
+    # check docker.service loaded
+    systemctl status docker | grep -q 'Loaded: loaded'
+    if [ $? -eq 0 ]; then
+        echo "node have loaded docker.service"
+        # if no containerd, docker.service must active.
+        if [[ `systemctl is-active docker`x == activex ]]; then
+        # check docker.sock
+        curl --connect-timeout 20 -m 20 --unix-socket /var/hostrun/docker.sock http://x/containers/json >/dev/null 2>&1
+        if [[ $? -ne 0 ]]; then
+            echo "docker ps check error"
+            exit ${NONOK}
+        fi
+        else
+        echo "node docker.service is loaded, but inactive."
+        exit ${NONOK}
+        fi
+    else
+    echo "node have no docker service loaded, maybe containerd."
+    # 2. containerd runtime.
+    # check containerd status
+    systemctl list-units --type=service -a | grep -q containerd
+    if [ $? -eq 0 ]; then
+        echo "node have containerd service"
+        CONTAINERD_STATUS=`systemctl is-active containerd`
+        echo $CONTAINERD_STATUS
+        if [[ "$CONTAINERD_STATUS"x != "activex" ]]; then
+            echo "containerd ps check error"
+            exit ${NONOK}
+        fi
+    fi
+    fi
+    exit ${OK}
+  check_inodes.sh: |
+    #!/bin/bash
+    # check inode utilization on block device of mounting point /
+    OK=0
+    NONOK=1
+    UNKNOWN=2
+
+    iuse=$(df -i | grep "/$" | grep -e [0-9]*% -o | tr -d %)
+
+    if [[ $iuse -gt 80 ]]; then
+    echo "current inode usage is over 80% on node"
+    exit $NONOK
+    fi
+    echo "node has no inode pressure"
+    exit $OK
+  check_ntp.sh: |
+    #!/bin/bash
+
+    # NOTE: THIS NTP SERVICE CHECK SCRIPT ASSUME THAT NTP SERVICE IS RUNNING UNDER SYSTEMD.
+    #       THIS IS JUST AN EXAMPLE. YOU CAN WRITE YOUR OWN NODE PROBLEM PLUGIN ON DEMAND.
+
+    OK=0
+    NONOK=1
+    UNKNOWN=2
+
+    ntpStatus=1
+    systemctl status ntpd.service | grep 'Active:' | grep -q running
+    if [ $? -ne 0 ]; then
+        ntpStatus=0
+    fi
+
+    chronydStatus=1
+    systemctl status chronyd.service | grep 'Active:' | grep -q running
+    if [ $? -ne 0 ]; then
+        chronydStatus=0
+    fi
+
+    if [ $ntpStatus -eq 0 ] && [ $chronydStatus -eq 0 ]; then
+        echo "NTP service is not running"
+        exit $NONOK
+    fi
+
+    echo "NTP service is running"
+    exit $OK
+  check_pid_pressure.sh: |
+    #!/bin/sh
+
+    OK=0
+    NONOK=1
+    UNKNOWN=2
+
+    pidMax=$(cat /host/proc/sys/kernel/pid_max)
+    threshold=85
+    availablePid=$(($pidMax * $threshold / 100))
+    activePid=$(ls /host/proc/ |grep  -e "[0-9]" |wc -l)
+    if [ $activePid -gt $availablePid ]; then
+        echo "Total running PIDs: $activePid, greater than $availablePid ($threshold% of pidMax $pidMax)"
+        exit $NONOK
+    fi
+
+    echo "Has sufficient PID available"
+    exit $OK
+  docker-monitor.json: |
+    {
+        "plugin": "journald",
+        "pluginConfig": {
+            "source": "dockerd"
+        },
+        "logPath": "/var/log/journal",
+        "lookback": "5m",
+        "bufferSize": 10,
+        "source": "docker-monitor",
+        "conditions": [],
+        "rules": [
+            {
+                "type": "temporary",
+                "reason": "CorruptDockerImage",
+                "pattern": "Error trying v2 registry: failed to register layer: rename /var/lib/docker/image/(.+) /var/lib/docker/image/(.+): directory not empty.*"
+            }
+        ]
+    }
+  docker-offline-monitor.json: |
+    {
+      "plugin": "custom",
+      "pluginConfig": {
+        "invoke_interval": "30s",
+        "timeout": "30s",
+        "max_output_length": 80,
+        "concurrency": 3
+      },
+      "source": "docker-offline-custom-plugin-monitor",
+      "conditions": [
+        {
+          "type": "DockerOffline",
+          "reason": "DockerDaemonNotOffline",
+          "message": "docker daemon is ok"
+        },
+        {
+          "type": "RuntimeOffline",
+          "reason": "RuntimeDaemonNotOffline",
+          "message": "container runtime daemon is ok"
+        }
+      ],
+      "rules": [
+        {
+          "type": "permanent",
+          "condition": "RuntimeOffline",
+          "reason": "RuntimeDaemonOffline",
+          "path": "/config/plugin/check_docker_offline.sh",
+          "timeout": "25s"
+        },
+        {
+          "type": "temporary",
+          "reason": "RuntimeDaemonOffline",
+          "path": "/config/plugin/check_docker_offline.sh",
+          "timeout": "25s"
+        }
+      ]
+    }
+  inodes-problem-monitor.json: |
+    {
+      "plugin": "custom",
+      "pluginConfig": {
+        "invoke_interval": "120s",
+        "timeout": "30s",
+        "max_output_length": 80,
+        "concurrency": 3
+      },
+      "source": "inodes-custom-plugin-monitor",
+      "conditions": [
+        {
+          "type": "InodesPressure",
+          "reason": "NodeHasNoInodesPressure",
+          "message": "node has no inodes pressure"
+        }
+      ],
+      "rules": [
+        {
+          "type": "permanent",
+          "condition": "InodesPressure",
+          "reason": "NodeHasInodesPressure",
+          "message": "inodes usage is over 80% on /dev/sda",
+          "path": "/config/plugin/check_inodes.sh"
+        }
+      ]
+    }
+  instance_expired_checker.json: |
+    {
+      "plugin": "custom",
+      "pluginConfig": {
+        "invoke_interval": "600s",
+        "timeout": "30s",
+        "max_output_length": 80,
+        "concurrency": 3,
+        "enable_message_change_based_condition_update": false
+      },
+      "source": "instance_termination_custom_checker",
+      "conditions": [
+        {
+          "type": "InstanceExpired",
+          "reason": "InstanceNotToBeTerminated",
+          "message": "instance is not going to be terminated"
+        }
+      ],
+      "rules": [
+        {
+          "type": "temporary",
+          "reason": "InstanceToBeTerminated",
+          "path": "./config/plugin/instance_expired_checker.sh",
+          "timeout": "30s"
+        },
+        {
+          "type": "permanent",
+          "condition": "InstanceExpired",
+          "reason": "InstanceToBeTerminated",
+          "path": "./config/plugin/instance_expired_checker.sh",
+          "timeout": "30s"
+        }
+      ]
+    }
+  instance_expired_checker.sh: |
+    #!/bin/bash
+    OK=0
+    NONOK=1
+    UNKNOWN=2
+
+    check_url='http://100.100.100.200/latest/meta-data/instance/spot/termination-time'
+    for ((i=1; i<=5; i ++))
+    do
+      resp=$(curl --max-time 5 -s $check_url)
+      if [ $? != 0 ]; then
+        sleep 1
+      else
+        echo $resp
+        date --date $resp +"%s"
+        if [ $? != 0 ]; then
+          exit $OK
+        else
+          echo "instance is going to be terminated at $resp"
+          exit $NONOK
+        fi
+      fi
+    done
+    echo "curl $check_url exe fail after try 5 times"
+    exit $OK
+  kernel-monitor.json: |
+    {
+        "plugin": "kmsg",
+        "logPath": "/var/log/journal",
+        "lookback": "5m",
+        "bufferSize": 10,
+        "source": "kernel-monitor",
+        "conditions": [
+            {
+                "type": "KernelDeadlock",
+                "reason": "KernelHasNoDeadlock",
+                "message": "kernel has no deadlock"
+            },
+            {
+                "type": "ReadonlyFilesystem",
+                "reason": "FilesystemIsReadOnly",
+                "message": "Filesystem is read-only"
+            }
+        ],
+        "rules": [
+            {
+                "type": "temporary",
+                "reason": "PodOOMKilling",
+                "pattern": "Task in /kubepods.slice/(.+) killed as a result of limit of .*"
+            },
+            {
+                "type": "temporary",
+                "reason": "TaskHung",
+                "pattern": "task \\S+:\\w+ blocked for more than \\w+ seconds\\."
+            },
+            {
+                "type": "temporary",
+                "reason": "UnregisterNetDevice",
+                "pattern": "unregister_netdevice: waiting for \\w+ to become free. Usage count = \\d+"
+            },
+            {
+                "type": "temporary",
+                "reason": "KernelOops",
+                "pattern": "BUG: unable to handle kernel NULL pointer dereference at .*"
+            },
+            {
+                "type": "temporary",
+                "reason": "KernelOops",
+                "pattern": "divide error: 0000 \\[#\\d+\\] SMP"
+            },
+            {
+                "type": "permanent",
+                "condition": "KernelDeadlock",
+                "reason": "AUFSUmountHung",
+                "pattern": "task umount\\.aufs:\\w+ blocked for more than \\w+ seconds\\."
+            },
+            {
+                "type": "permanent",
+                "condition": "KernelDeadlock",
+                "reason": "DockerHung",
+                "pattern": "task docker:\\w+ blocked for more than \\w+ seconds\\."
+            },
+            {
+                "type": "permanent",
+                "condition": "ReadonlyFilesystem",
+                "reason": "FilesystemIsReadOnly",
+                "pattern": "Remounting filesystem read-only"
+            }
+        ]
+    }
+  network-problem-monitor.json: |
+    {
+      "plugin": "custom",
+      "pluginConfig": {
+        "invoke_interval": "30s",
+        "timeout": "5s",
+        "max_output_length": 80,
+        "concurrency": 3
+      },
+      "source": "network-custom-plugin-monitor",
+      "metricsReporting": true,
+      "conditions": [],
+      "rules": [
+        {
+          "type": "temporary",
+          "reason": "ConntrackFull",
+          "path": "/config/plugin/network_problem.sh",
+          "timeout": "3s"
+        }
+      ]
+    }
+  network_problem.sh: |
+    #!/bin/bash
+
+    # This plugin checks for common network issues.
+    # Currently only checks if conntrack table is more than 90% used.
+
+    readonly OK=0
+    readonly NONOK=1
+    readonly UNKNOWN=2
+
+    # "nf_conntrack" replaces "ip_conntrack" - support both
+    readonly NF_CT_COUNT_PATH='/host/proc/sys/net/netfilter/nf_conntrack_count'
+    readonly NF_CT_MAX_PATH='/host/proc/sys/net/netfilter/nf_conntrack_max'
+    readonly IP_CT_COUNT_PATH='/host/proc/sys/net/ipv4/netfilter/ip_conntrack_count'
+    readonly IP_CT_MAX_PATH='/host/proc/sys/net/ipv4/netfilter/ip_conntrack_max'
+
+    if [[ -f $NF_CT_COUNT_PATH ]] && [[ -f $NF_CT_MAX_PATH ]]; then
+      readonly CT_COUNT_PATH=$NF_CT_COUNT_PATH
+      readonly CT_MAX_PATH=$NF_CT_MAX_PATH
+    elif [[ -f $IP_CT_COUNT_PATH ]] && [[ -f $IP_CT_MAX_PATH ]]; then
+      readonly CT_COUNT_PATH=$IP_CT_COUNT_PATH
+      readonly CT_MAX_PATH=$IP_CT_MAX_PATH
+    else
+      exit $UNKNOWN
+    fi
+
+    readonly conntrack_count=$(< $CT_COUNT_PATH) || exit $UNKNOWN
+    readonly conntrack_max=$(< $CT_MAX_PATH) || exit $UNKNOWN
+    readonly conntrack_usage_msg="${conntrack_count} out of ${conntrack_max}"
+
+    if (( conntrack_count > conntrack_max * 9 /10 )); then
+      echo "Conntrack table usage over 90%: ${conntrack_usage_msg}"
+      exit $NONOK
+    else
+      echo "Conntrack table usage: ${conntrack_usage_msg}"
+      exit $OK
+    fi
+  ntp-problem-monitor.json: |
+    {
+      "plugin": "custom",
+      "pluginConfig": {
+        "invoke_interval": "600s",
+        "timeout": "60s",
+        "max_output_length": 80,
+        "concurrency": 3,
+        "enable_message_change_based_condition_update": false
+      },
+      "source": "ntp-custom-plugin-monitor",
+      "conditions": [
+        {
+          "type": "NTPProblem",
+          "reason": "NTPIsUp",
+          "message": "ntp service is up"
+        }
+      ],
+      "rules": [
+        {
+          "type": "temporary",
+          "reason": "NTPIsDown",
+          "path": "./config/plugin/check_ntp.sh",
+          "timeout": "60s"
+        },
+        {
+          "type": "permanent",
+          "condition": "NTPProblem",
+          "reason": "NTPIsDown",
+          "path": "./config/plugin/check_ntp.sh",
+          "timeout": "60s"
+        }
+      ]
+    }
+  pid-pressure-problem-monitor.json: |
+    {
+      "plugin": "custom",
+      "pluginConfig": {
+        "invoke_interval": "300s",
+        "timeout": "60s",
+        "max_output_length": 100,
+        "concurrency": 3
+      },
+      "source": "pid-pressure-custom-plugin-monitor",
+      "conditions": [
+        {
+          "type": "NodePIDPressure",
+          "reason": "NodeHasNoPIDPressure",
+          "message": "Node has no PID Pressure"
+        }
+      ],
+      "rules": [
+        {
+          "type": "permanent",
+          "condition": "NodePIDPressure",
+          "reason": "NodeHasPIDPressure",
+          "message": "node has no PID available",
+          "path": "./config/plugin/check_pid_pressure.sh",
+          "timeout": "20s"
+        }
+      ]
+    }

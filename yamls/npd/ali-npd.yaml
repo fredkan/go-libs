@@ -1,0 +1,151 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  labels:
+    app: ack-node-problem-detector
+  name: ack-node-problem-detector-daemonset
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      app: ack-node-problem-detector
+  template:
+    metadata:
+      labels:
+        app: ack-node-problem-detector
+    spec:
+      containers:
+      - command:
+        - /node-problem-detector
+        - --logtostderr
+        - --v=3
+        - --system-log-monitors=/config/kernel-monitor.json,/config/docker-monitor.json
+        - --custom-plugin-monitors=/config/ntp-problem-monitor.json
+        - --custom-plugin-monitors=/config/network-problem-monitor.json
+        - --custom-plugin-monitors=/config/inodes-problem-monitor.json
+        - --custom-plugin-monitors=/config/pid-pressure-problem-monitor.json
+        - --custom-plugin-monitors=/config/docker-offline-monitor.json
+        - --custom-plugin-monitors=/config/instance_expired_checker.json
+        env:
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: spec.nodeName
+        - name: SYSTEMD_OFFLINE
+          value: "0"
+        image: registry-vpc.cn-zhangjiakou.aliyuncs.com/acs/node-problem-detector:v0.8.10-e0ff7d2
+        imagePullPolicy: Always
+        name: ack-node-problem-detector
+        securityContext:
+          privileged: true
+        volumeMounts:
+        - mountPath: /var/log
+          name: log
+          readOnly: true
+        - mountPath: /dev/kmsg
+          name: kmsg
+          readOnly: true
+        - mountPath: /etc/localtime
+          name: localtime
+          readOnly: true
+        - mountPath: /config
+          name: config
+          readOnly: true
+        - mountPath: /host/proc
+          name: proc
+          readOnly: true
+        - mountPath: /var/run/dbus
+          name: dbus
+          readOnly: true
+        - mountPath: /run/systemd
+          name: systemd
+          readOnly: true
+        - mountPath: /etc/systemd/system
+          name: system
+          readOnly: true
+        - mountPath: /sys/fs/cgroup
+          name: cgroup
+          readOnly: true
+        - mountPath: /var/hostrun
+          name: dockersock
+          readOnly: true
+      hostNetwork: true
+      hostPID: true
+      serviceAccount: ack-node-problem-detector
+      serviceAccountName: ack-node-problem-detector
+      volumes:
+      - hostPath:
+          path: /var/log/
+          type: ""
+        name: log
+      - hostPath:
+          path: /dev/kmsg
+          type: ""
+        name: kmsg
+      - hostPath:
+          path: /etc/localtime
+          type: ""
+        name: localtime
+      - hostPath:
+          path: /proc
+          type: ""
+        name: proc
+      - hostPath:
+          path: /var/run/dbus
+          type: ""
+        name: dbus
+      - hostPath:
+          path: /run/systemd
+          type: ""
+        name: systemd
+      - hostPath:
+          path: /etc/systemd/system
+          type: ""
+        name: system
+      - hostPath:
+          path: /sys/fs/cgroup
+          type: ""
+        name: cgroup
+      - hostPath:
+          path: /var/run
+          type: DirectoryOrCreate
+        name: dockersock
+      - configMap:
+          defaultMode: 493
+          items:
+          - key: kernel-monitor.json
+            path: kernel-monitor.json
+          - key: docker-monitor.json
+            path: docker-monitor.json
+          - key: ntp-problem-monitor.json
+            path: ntp-problem-monitor.json
+          - key: check_ntp.sh
+            path: plugin/check_ntp.sh
+          - key: network-problem-monitor.json
+            path: network-problem-monitor.json
+          - key: network_problem.sh
+            path: plugin/network_problem.sh
+          - key: inodes-problem-monitor.json
+            path: inodes-problem-monitor.json
+          - key: check_inodes.sh
+            path: plugin/check_inodes.sh
+          - key: pid-pressure-problem-monitor.json
+            path: pid-pressure-problem-monitor.json
+          - key: check_pid_pressure.sh
+            path: plugin/check_pid_pressure.sh
+          - key: docker-offline-monitor.json
+            path: docker-offline-monitor.json
+          - key: check_docker_offline.sh
+            path: plugin/check_docker_offline.sh
+          - key: instance_expired_checker.json
+            path: instance_expired_checker.json
+          - key: instance_expired_checker.sh
+            path: plugin/instance_expired_checker.sh
+          name: ack-node-problem-detector-config
+        name: config
+  updateStrategy:
+    rollingUpdate:
+      maxUnavailable: 1
+    type: RollingUpdate
+
